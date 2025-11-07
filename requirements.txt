@@ -1,0 +1,6 @@
+streamlit>=1.30
+requests>=2.31
+beautifulsoup4>=4.12.3
+lxml>=4.9      # parser for BeautifulSoup (faster & more reliable than built-in)
+python-dotenv>=1.0.1
+groq>=0.9.0
