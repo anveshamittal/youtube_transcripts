@@ -6,12 +6,13 @@ import traceback
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from groq import Groq
+import google.generativeai as genai
 
 # Load environment variables
 load_dotenv()
 
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+GEMINI_MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
 
 # --- YOUR YOUTUBEPROCESSOR CLASS (No changes needed here) ---
 
@@ -22,13 +23,23 @@ class YouTubeProcessor:
             'lesson', 'training', 'guide', 'how to', 'explained',
             'introduction to', 'basics of', 'educational', 'study',
             'learning', 'academy', 'university', 'college', 'school',
-            'teaching', 'instructor', 'professor', 'classroom'
+            'teaching', 'instructor', 'professor', 'classroom',
+            'compiler', 'compiler design', 'algorithm', 'data structure',
+            'computer science', 'programming', 'coding', 'software engineering',
+            'mathematics', 'engineering', 'exam', 'gate', 'gatehub',
+            'three address code', 'triples', 'indirect triples', 'representation'
         ]
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        # Initialize the client with the API key
-        self.groq_client = Groq(api_key=GROQ_API_KEY)
+        # Initialize Gemini with the API key
+        genai.configure(api_key=GEMINI_API_KEY)
+        self.gemini_model_names = [
+            GEMINI_MODEL_NAME,
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-flash-latest',
+        ]
 
     def extract_video_id(self, url):
         """Extract video ID from various YouTube URL formats."""
@@ -70,7 +81,8 @@ class YouTubeProcessor:
             
             title = soup.find('meta', property='og:title')['content']
             description = soup.find('meta', property='og:description')['content']
-            channel = soup.find('link', itemprop='name')['content'] if soup.find('link', itemprop='name') else "Unknown Channel"
+            channel_tag = soup.find('link', itemprop='name')
+            channel = channel_tag['content'] if channel_tag and channel_tag.has_attr('content') else "Unknown Channel"
             
             return {
                 'title': title,
@@ -89,14 +101,14 @@ class YouTubeProcessor:
             return False
 
         try:
-            title = video_info['title'].lower()
-            description = video_info['description'].lower()
-            channel = video_info['channel'].lower()
+            title = str(video_info.get('title') or '').lower()
+            description = str(video_info.get('description') or '').lower()
+            channel = str(video_info.get('channel') or '').lower()
             
             # Print statements will show in your terminal, not in Streamlit
             print("\nAnalyzing video metadata:")
-            print(f"Title: {video_info['title']}")
-            print(f"Channel: {video_info['channel']}")
+            print(f"Title: {video_info.get('title', 'N/A')}")
+            print(f"Channel: {video_info.get('channel', 'N/A')}")
             
             for keyword in self.educational_keywords:
                 if keyword in title or keyword in description or keyword in channel:
@@ -111,7 +123,7 @@ class YouTubeProcessor:
             return False
 
     def generate_notes_and_flashcards(self, video_info):
-        """Generate study notes and flashcards using Groq API."""
+        """Generate study notes and flashcards using Gemini."""
         try:
             prompt = f"""
             Based on this YouTube video information, please:
@@ -135,17 +147,24 @@ class YouTubeProcessor:
             ...
             """
 
-            chat_completion = self.groq_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You are an expert educational content summarizer."},
-                    {"role": "user", "content": prompt}
-                ],
-                model="llama-3.3-70b-versatile",
-                temperature=0.7,
-                max_tokens=2048
-            )
+            last_error = None
+            for model_name in self.gemini_model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(
+                        prompt,
+                        generation_config={
+                            "temperature": 0.7,
+                            "max_output_tokens": 2048,
+                        },
+                    )
+                    if getattr(response, 'text', None):
+                        return response.text
+                    last_error = "Gemini returned an empty response."
+                except Exception as model_error:
+                    last_error = f"{model_name}: {model_error}"
 
-            return chat_completion.choices[0].message.content
+            raise RuntimeError(f"Unable to generate content with Gemini. Last error: {last_error}")
 
         except Exception as e:
             # This error will be returned to the Streamlit UI
@@ -167,9 +186,10 @@ class YouTubeProcessor:
             video_info = self.get_video_info(video_id)
             if not video_info:
                 return {"error": "Could not fetch video information"}
-            
-            if not self.is_educational_content(video_info):
-                return {"error": "This video does not appear to be educational content"}
+
+            # Treat the educational check as advisory only so non-lesson videos
+            # can still be summarized into notes and flashcards.
+            educational = self.is_educational_content(video_info)
             
             content = self.generate_notes_and_flashcards(video_info)
             
@@ -181,6 +201,7 @@ class YouTubeProcessor:
                 "success": True,
                 "video_id": video_id,
                 "title": video_info['title'],
+                "educational": educational,
                 "content": content
             }
 
@@ -195,9 +216,10 @@ st.set_page_config(page_title="YT Note Generator", layout="wide")
 st.title("YouTube Video Note & Flashcard Generator 📼🧠")
 
 # Check if the API key is available
-if not GROQ_API_KEY:
-    st.error("GROQ_API_KEY not found! 🤫 Please add it to your .env file.")
+if not GEMINI_API_KEY:
+    st.error("GEMINI_API_KEY not found! Please add it to your .env file.")
 else:
+    st.caption(f"Using Gemini model: {GEMINI_MODEL_NAME}")
     # Use st.cache_resource to initialize the processor only once
     @st.cache_resource
     def init_processor():
@@ -223,6 +245,8 @@ else:
                         st.error(f"Error: {result['error']}")
                     else:
                         st.subheader(f"Video Title: {result['title']}")
+                        if not result.get("educational", True):
+                            st.warning("This video did not match the educational keyword filter, but notes were generated anyway.")
                         # Embed the YouTube video
                         st.video(url) 
                         
